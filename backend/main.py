@@ -8,6 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
+@app.get("/")
+def root():
+    return{"message":"Welcome to the dashboard"}
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
