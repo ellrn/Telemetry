@@ -5,6 +5,7 @@ from io import StringIO
 import json
 import math
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import HTTPException
 
 app = FastAPI()
 
@@ -38,14 +39,14 @@ def list_cars():
         ]
         return {"cars": cars}
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=400, detail="...")
 
 @app.get("/tracks")
 def list_tracks(car: str):
     """List all tracks for a given car."""
     car_folder = os.path.join(BASE_LOG_DIR, car)
     if not os.path.exists(car_folder):
-        return {"error": f"Car '{car}' not found"}
+        raise HTTPException(status_code=400, detail="...")
     
     tracks = [
         name for name in os.listdir(car_folder)
@@ -141,7 +142,7 @@ def get_telemetry(car: str, track: str, window: int = 30):
     try:
         folder = get_folder_for_car_track(car, track)
     except ValueError as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=400, detail="...")
 
     latest_csv = get_latest_csv(folder)
     if not latest_csv:
