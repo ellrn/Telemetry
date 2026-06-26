@@ -1,68 +1,29 @@
 import os
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from io import StringIO
 import json
 import math
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import HTTPException
 
 app = FastAPI()
 
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("FRONTEND_ORIGINS", os.getenv("FRONTEND_URL", "*")).split(",")
+    if origin.strip()
+]
+
 @app.get("/")
 def root():
-    return{"message":"Welcome to the dashboard"}
+    return {"message": "Welcome to the dashboard"}
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=allowed_origins,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
-
-# Base folder where all cars are stored
-BASE_LOG_DIR = r"C:\Users\ellis\Documents\Assetto Corsa\apps\telemetrick\exported\si3v"
-
-def get_folder_for_car_track(car: str, track: str):
-    folder_path = os.path.join(BASE_LOG_DIR, car, track)
-    if not os.path.exists(folder_path):
-        raise ValueError(f"Folder not found for car '{car}' and track '{track}'")
-    return folder_path
-
-@app.get("/cars")
-def list_cars():
-    """List all available cars (folders in BASE_LOG_DIR)."""
-    try:
-        cars = [
-            name for name in os.listdir(BASE_LOG_DIR)
-            if os.path.isdir(os.path.join(BASE_LOG_DIR, name))
-        ]
-        return {"cars": cars}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail="...")
-
-@app.get("/tracks")
-def list_tracks(car: str):
-    """List all tracks for a given car."""
-    car_folder = os.path.join(BASE_LOG_DIR, car)
-    if not os.path.exists(car_folder):
-        raise HTTPException(status_code=400, detail="...")
-    
-    tracks = [
-        name for name in os.listdir(car_folder)
-        if os.path.isdir(os.path.join(car_folder, name))
-    ]
-    return {"tracks": tracks}
-
-def get_latest_csv(folder):
-    csv_files = [
-        os.path.join(folder, f)
-        for f in os.listdir(folder)
-        if f.endswith(".csv")
-    ]
-    if not csv_files:
-        return None
-    return max(csv_files, key=os.path.getctime)
 
 def extract_metadata(lines):
     metadata = {}
@@ -90,11 +51,8 @@ def extract_car_setup(lines):
         setup[h] = {"unit": u, "value": v}
     return setup
 
-def load_telemetry_data(csv_path):
-    with open(csv_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-
-    # Find real telemetry start
+def load_telemetry_data_from_lines(lines):
+    """Finds telemetry data from split text lines in memory."""
     start_idx = None
     for i, line in enumerate(lines):
         if line.strip().lower().startswith("time"):
@@ -102,9 +60,9 @@ def load_telemetry_data(csv_path):
             break
 
     if start_idx is None:
-        raise ValueError("Telemetry header not found")
+        raise ValueError("Telemetry header ('Time') not found in the file.")
 
-    telemetry_block = "".join(lines[start_idx:])
+    telemetry_block = "\n".join(lines[start_idx:])
 
     df = pd.read_csv(
         StringIO(telemetry_block),
@@ -116,7 +74,7 @@ def load_telemetry_data(csv_path):
     # Clean column names
     df.columns = [c.strip() for c in df.columns]
 
-    # 🔥 REMOVE completely empty columns (huge fix)
+    # Remove completely empty columns
     df = df.dropna(axis=1, how="all")
 
     return df
@@ -133,59 +91,48 @@ def make_json_safe(obj):
         return obj
     return obj
 
-@app.get("/telemetry")
-def get_telemetry(car: str, track: str, window: int = 30):
+@app.post("/telemetry")
+async def get_telemetry(file: UploadFile = File(...), window: int = Query(30)):
     """
-    Returns telemetry data filtered by time window.
+    Accepts a telemetry CSV file via upload and returns filtered data.
     """
-
+    # 1. Read file stream from memory
     try:
-        folder = get_folder_for_car_track(car, track)
+        contents = await file.read()
+        # Decode binary bytes to a clean list of text lines
+        lines = contents.decode("utf-8").splitlines()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
+
+    # 2. Extract telemetry dataframe using memory-lines
+    try:
+        df = load_telemetry_data_from_lines(lines)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail="...")
-
-    latest_csv = get_latest_csv(folder)
-    if not latest_csv:
-        return {"error": f"No telemetry found for car '{car}' and track '{track}'"}
-
-    # -----------------------------
-    # LOAD DATAFRAME
-    # -----------------------------
-    df = load_telemetry_data(latest_csv)
-
-    # Clean column names early
-    df.columns = [c.strip() for c in df.columns]
+        raise HTTPException(status_code=400, detail=str(e))
 
     # Ensure time column exists
     if "time" not in df.columns:
         df.rename(columns={df.columns[0]: "time"}, inplace=True)
 
-    # -----------------------------
-    # FORCE NUMERIC TIME (IMPORTANT FIX)
-    # -----------------------------
+    # FORCE NUMERIC TIME
     df["time"] = pd.to_numeric(df["time"], errors="coerce")
     df = df.dropna(subset=["time"])
 
-    # Sort by time (VERY IMPORTANT for charts)
+    # Sort by time
     df = df.sort_values("time").reset_index(drop=True)
 
-    # -----------------------------
-    # TIME WINDOW FILTER (RELATIVE START)
-    # -----------------------------
-    start_time = df["time"].iloc[0]
-    end_time = start_time + window
+    # 3. TIME WINDOW FILTER (RELATIVE START)
+    if not df.empty:
+        start_time = df["time"].iloc[0]
+        end_time = start_time + window
+        df = df[(df["time"] >= start_time) & (df["time"] <= end_time)]
 
-    df = df[(df["time"] >= start_time) & (df["time"] <= end_time)]
-
-    # -----------------------------
-    # CONVERT TO JSON
-    # -----------------------------
+    # 4. CONVERT TO JSON
     table_data = df.to_dict(orient="records")
 
     table_data_safe = []
     for row in table_data:
         clean_row = {}
-
         for k, v in row.items():
             if isinstance(v, float):
                 if math.isnan(v) or math.isinf(v):
@@ -194,22 +141,28 @@ def get_telemetry(car: str, track: str, window: int = 30):
                     clean_row[k] = v
             else:
                 clean_row[k] = v
-
         table_data_safe.append(clean_row)
+
+    # 5. DYNAMICALLY EXTRACT METADATA FROM UPLOADED CSV
+    parsed_metadata = extract_metadata(lines)
+    
+    # Check your CSV file structure; adjust keys below matching your CSV header labels
+    car_name = parsed_metadata.get("Car") or parsed_metadata.get("Vehicle") or "Unknown Car"
+    track_name = parsed_metadata.get("Track") or parsed_metadata.get("Venue") or "Unknown Track"
 
     metadata_safe = make_json_safe({
         "Format": "AC pyTelemetry CSV",
-        "Venue": track,
-        "Vehicle": car,
+        "Venue": track_name,
+        "Vehicle": car_name,
         "Driver": "Ellis",
         "Sample Rate": "50",
         "Duration": table_data_safe[-1]["time"] if table_data_safe else None
     })
 
     return {
-        "file": os.path.basename(latest_csv),
-        "car": car,
-        "track": track,
+        "file": file.filename,
+        "car": car_name,
+        "track": track_name,
         "rows": len(df),
         "columns": list(df.columns),
         "data": table_data_safe,

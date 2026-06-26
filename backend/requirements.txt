@@ -12,6 +12,7 @@ pandas
 pydantic
 pydantic_core
 python-dateutil
+python-multipart
 six
 sqlparse
 starlette

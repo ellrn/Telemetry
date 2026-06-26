@@ -25,29 +25,35 @@ type TelemetryData = {
   metadata?: Record<string, string | number | undefined>;
 };
 
-const API_BASE = "http://localhost:8000";
-const TELEMETRY_WINDOW_SECONDS = 30;
-
+const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 function backendError(payload: unknown, fallback: string) {
   if (payload && typeof payload === "object" && "error" in payload) {
     return String((payload as { error: unknown }).error);
   }
 
+  if (payload && typeof payload === "object" && "detail" in payload) {
+    return String((payload as { detail: unknown }).detail);
+  }
+
   return fallback;
 }
 
-async function fetchBackend<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    cache: "no-store",
+async function uploadTelemetry(file: File, signal?: AbortSignal): Promise<TelemetryData> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetch(`${API_BASE}/telemetry`, {
+    method: "POST",
+    body: formData,
     signal,
   });
   const payload = await response.json();
 
   if (!response.ok || (payload && typeof payload === "object" && "error" in payload)) {
-    throw new Error(backendError(payload, `Backend request failed: ${path}`));
+    throw new Error(backendError(payload, "Telemetry upload failed."));
   }
 
-  return payload as T;
+  return normalizeTelemetry(payload);
 }
 
 function normalizeTelemetry(payload: unknown): TelemetryData {
@@ -82,13 +88,9 @@ export default function Home() {
     return storedTheme === "light" ? false : true;
   });
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
-  const [selectedCar, setSelectedCar] = useState("");
-  const [selectedTrack, setSelectedTrack] = useState("");
   const [selectedCsvFile, setSelectedCsvFile] = useState<File | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetryData | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
-  const [loadingCars, setLoadingCars] = useState(false);
-  const [loadingTracks, setLoadingTracks] = useState(false);
   const [loadingTelemetry, setLoadingTelemetry] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const dashboardRef = useRef<HTMLElement | null>(null);
@@ -102,97 +104,15 @@ export default function Home() {
 
   useEffect(() => {
     if (!selectedCsvFile) {
-      setSelectedCar("");
-      setSelectedTrack("");
       setTelemetry(null);
       setSearchTerm("");
       setLoadError(null);
-      setLoadingCars(false);
-      setLoadingTracks(false);
       setLoadingTelemetry(false);
       return;
     }
 
-    let cancelled = false;
-
-    async function loadCars() {
-      setLoadingCars(true);
-      setLoadError(null);
-
-      try {
-        const payload = await fetchBackend<{ cars: string[] }>("/cars");
-        const nextCars = Array.isArray(payload.cars) ? payload.cars.map(String) : [];
-
-        if (cancelled) return;
-
-        setSelectedCar(nextCars[0] ?? "");
-      } catch (error) {
-        if (!cancelled) {
-          setTelemetry(null);
-          setLoadError(error instanceof Error ? error.message : "Unable to load cars from backend.");
-        }
-      } finally {
-        if (!cancelled) setLoadingCars(false);
-      }
-    }
-
-    loadCars();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedCsvFile]);
-
-  useEffect(() => {
-    if (!selectedCsvFile || !selectedCar) {
-      setSelectedTrack("");
-      setTelemetry(null);
-      return;
-    }
-
+    const csvFile = selectedCsvFile;
     const controller = new AbortController();
-    const query = new URLSearchParams({ car: selectedCar }).toString();
-
-    async function loadTracks() {
-      setLoadingTracks(true);
-      setLoadError(null);
-      setSelectedTrack("");
-      setTelemetry(null);
-      setSearchTerm("");
-
-      try {
-        const payload = await fetchBackend<{ tracks: string[] }>(`/tracks?${query}`, controller.signal);
-        const nextTracks = Array.isArray(payload.tracks) ? payload.tracks.map(String) : [];
-
-        if (controller.signal.aborted) return;
-
-        setSelectedTrack(nextTracks[0] ?? "");
-      } catch (error) {
-        if (!controller.signal.aborted) {
-          setLoadError(error instanceof Error ? error.message : "Unable to load tracks from backend.");
-        }
-      } finally {
-        if (!controller.signal.aborted) setLoadingTracks(false);
-      }
-    }
-
-    loadTracks();
-
-    return () => controller.abort();
-  }, [selectedCsvFile, selectedCar]);
-
-  useEffect(() => {
-    if (!selectedCsvFile || !selectedCar || !selectedTrack) {
-      setTelemetry(null);
-      return;
-    }
-
-    const controller = new AbortController();
-    const query = new URLSearchParams({
-      car: selectedCar,
-      track: selectedTrack,
-      window: String(TELEMETRY_WINDOW_SECONDS),
-    }).toString();
 
     async function loadTelemetry() {
       setLoadingTelemetry(true);
@@ -201,13 +121,11 @@ export default function Home() {
       setSearchTerm("");
 
       try {
-        const payload = await fetchBackend<unknown>(`/telemetry?${query}`, controller.signal);
-        const nextTelemetry = normalizeTelemetry(payload);
-
+        const nextTelemetry = await uploadTelemetry(csvFile, controller.signal);
         if (!controller.signal.aborted) setTelemetry(nextTelemetry);
       } catch (error) {
         if (!controller.signal.aborted) {
-          setLoadError(error instanceof Error ? error.message : "Unable to load telemetry from backend.");
+          setLoadError(error instanceof Error ? error.message : "Unable to upload telemetry CSV.");
         }
       } finally {
         if (!controller.signal.aborted) setLoadingTelemetry(false);
@@ -217,7 +135,7 @@ export default function Home() {
     loadTelemetry();
 
     return () => controller.abort();
-  }, [selectedCsvFile, selectedCar, selectedTrack]);
+  }, [selectedCsvFile]);
 
   const filteredData = useMemo(() => {
     if (!telemetry) return [];
@@ -264,8 +182,6 @@ export default function Home() {
     });
   }, []);
 
-  const isLoading = loadingCars || loadingTracks || loadingTelemetry;
-
   return (
     <div className={darkMode ? "dark min-h-screen" : "min-h-screen"}>
       <div className="min-h-screen bg-background text-foreground transition-colors duration-300">
@@ -274,7 +190,7 @@ export default function Home() {
           setSelectedCsvFile={setSelectedCsvFile}
           darkMode={darkMode}
           setDarkMode={setDarkMode}
-          loading={isLoading}
+          loading={loadingTelemetry}
         />
 
         <main className="mx-auto flex w-full max-w-7xl flex-col px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
@@ -288,8 +204,6 @@ export default function Home() {
 
           <MetadataBar
             telemetry={telemetry}
-            selectedTrack={selectedTrack}
-            selectedCar={selectedCar}
             onExport={handleExport}
             darkMode={darkMode}
           />
