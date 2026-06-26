@@ -35,23 +35,40 @@ export default function DataTableView({
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
 
-  const cleanedColumns = useMemo(
-    () =>
-      (telemetry?.columns ?? []).filter((col) =>
-        filteredData.some((row) => row?.[col] !== null && row?.[col] !== undefined && row?.[col] !== "")
-      ),
-    [filteredData, telemetry?.columns]
+  const displayColumns = useMemo(
+    () => (telemetry?.columns ?? []).filter((col) => visibleColumns.includes(col)),
+    [telemetry?.columns, visibleColumns]
   );
 
-  const totalPages = Math.max(1, Math.ceil(filteredData.length / pageSize));
+  const sampledData = useMemo(() => {
+    const rowsBySecond = new Map<number, TelemetryRow>();
+
+    for (const row of filteredData) {
+      const time = Number(row.time);
+
+      if (!Number.isFinite(time)) {
+        return filteredData;
+      }
+
+      const second = Math.floor(time);
+
+      if (!rowsBySecond.has(second)) {
+        rowsBySecond.set(second, row);
+      }
+    }
+
+    return Array.from(rowsBySecond.values());
+  }, [filteredData]);
+
+  const totalPages = Math.max(1, Math.ceil(sampledData.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const pageStart = (currentPage - 1) * pageSize;
-  const pageRows = filteredData.slice(pageStart, pageStart + pageSize);
-  const firstRow = filteredData.length === 0 ? 0 : pageStart + 1;
-  const lastRow = Math.min(pageStart + pageSize, filteredData.length);
+  const pageRows = sampledData.slice(pageStart, pageStart + pageSize);
+  const firstRow = sampledData.length === 0 ? 0 : pageStart + 1;
+  const lastRow = Math.min(pageStart + pageSize, sampledData.length);
 
   const isNumericColumn = (column: string) =>
-    filteredData.some((row) => Number.isFinite(Number(row?.[column])));
+    sampledData.some((row) => Number.isFinite(Number(row?.[column])));
 
   if (!telemetry?.columns || !Array.isArray(filteredData)) {
     return (
@@ -90,7 +107,7 @@ export default function DataTableView({
 
         <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-500">
           <span className="font-mono">
-            Showing {firstRow}-{lastRow} of {filteredData.length}
+            Showing {firstRow}-{lastRow} of {sampledData.length}
           </span>
           <label className="flex items-center gap-2">
             Rows
@@ -110,61 +127,60 @@ export default function DataTableView({
         </div>
       </div>
 
-      <div className="h-[560px] w-full overflow-auto">
-        <table className="w-full border-collapse text-left text-sm">
-          <thead
-            className={`sticky top-0 z-10 text-[0.68rem] uppercase tracking-wide ${
-              darkMode
-                ? "bg-[#1d2128] text-zinc-400"
-                : "bg-zinc-100 text-zinc-600"
-            }`}
-          >
-            <tr>
-              {cleanedColumns.map((col) =>
-                visibleColumns.includes(col) ? (
-                  <th
-                    key={col}
-                    className={`whitespace-nowrap border-b px-4 py-3 font-medium ${isNumericColumn(col) ? "text-right" : "text-left"} ${darkMode ? "border-white/10" : "border-zinc-200"}`}
-                  >
-                    {col}
-                  </th>
-                ) : null
-              )}
-            </tr>
-          </thead>
-
-          <tbody className={`font-mono ${darkMode ? "divide-y divide-white/5" : "divide-y divide-zinc-100"}`}>
-            {pageRows.map((row, idx) => (
-              <tr
-                key={`${pageStart + idx}-${row.time ?? ""}`}
-                className={`
-                  transition-colors
-                  ${idx % 2 === 0
-                    ? darkMode
-                      ? "bg-transparent"
-                      : "bg-white"
-                    : darkMode
-                    ? "bg-white/[0.025]"
-                    : "bg-zinc-50/80"}
-                  ${darkMode ? "hover:bg-red-400/5" : "hover:bg-red-50/70"}
-                `}
-              >
-                {cleanedColumns.map((col) =>
-                  visibleColumns.includes(col) ? (
-                    <td key={col} className={`whitespace-nowrap px-4 py-2.5 ${isNumericColumn(col) ? "text-right" : "text-left"} ${col.toLowerCase().includes("time") ? "text-red-300" : darkMode ? "text-zinc-300" : "text-zinc-700"}`}>
-                      {formatValue(col, row?.[col])}
-                    </td>
-                  ) : null
-                )}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-
-        {/* Empty state */}
-        {filteredData.length === 0 && (
+      <div className="h-[560px] w-full overflow-y-auto overflow-x-hidden p-3">
+        {sampledData.length === 0 && (
           <div className="p-8 text-center text-zinc-500">
             No matching records found.
+          </div>
+        )}
+
+        {pageRows.length > 0 && (
+          <div className="space-y-3">
+            {pageRows.map((row, idx) => (
+              <article
+                key={`${pageStart + idx}-${row.time ?? ""}`}
+                className={`rounded-md border transition-colors ${
+                  darkMode
+                    ? "border-white/10 bg-[#111316] hover:bg-red-400/5"
+                    : "border-zinc-200 bg-white hover:bg-red-50/60"
+                }`}
+              >
+                <div className={`flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3 ${darkMode ? "border-white/10" : "border-zinc-100"}`}>
+                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                    Sample {pageStart + idx + 1}
+                  </span>
+                  <span className={`font-mono text-xs ${darkMode ? "text-red-300" : "text-red-600"}`}>
+                    Time {formatValue("time", row.time)}
+                  </span>
+                </div>
+
+                <dl className="grid grid-cols-1 gap-px p-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+                  {displayColumns.map((col) => {
+                    const numeric = isNumericColumn(col);
+
+                    return (
+                      <div
+                        key={col}
+                        className={`min-w-0 rounded px-3 py-2 ${
+                          darkMode ? "bg-white/[0.025]" : "bg-zinc-50"
+                        }`}
+                      >
+                        <dt className="truncate text-[0.68rem] font-medium uppercase tracking-wide text-zinc-500" title={col}>
+                          {col}
+                        </dt>
+                        <dd
+                          className={`mt-1 break-words font-mono text-sm tabular-nums ${
+                            numeric ? "text-right" : "text-left"
+                          } ${col.toLowerCase().includes("time") ? "text-red-300" : darkMode ? "text-zinc-300" : "text-zinc-700"}`}
+                        >
+                          {formatValue(col, row?.[col])}
+                        </dd>
+                      </div>
+                    );
+                  })}
+                </dl>
+              </article>
+            ))}
           </div>
         )}
       </div>

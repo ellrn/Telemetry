@@ -82,10 +82,9 @@ export default function Home() {
     return storedTheme === "light" ? false : true;
   });
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
-  const [cars, setCars] = useState<string[]>([]);
-  const [tracks, setTracks] = useState<string[]>([]);
   const [selectedCar, setSelectedCar] = useState("");
   const [selectedTrack, setSelectedTrack] = useState("");
+  const [selectedCsvFile, setSelectedCsvFile] = useState<File | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetryData | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [loadingCars, setLoadingCars] = useState(false);
@@ -102,6 +101,18 @@ export default function Home() {
   }, [darkMode]);
 
   useEffect(() => {
+    if (!selectedCsvFile) {
+      setSelectedCar("");
+      setSelectedTrack("");
+      setTelemetry(null);
+      setSearchTerm("");
+      setLoadError(null);
+      setLoadingCars(false);
+      setLoadingTracks(false);
+      setLoadingTelemetry(false);
+      return;
+    }
+
     let cancelled = false;
 
     async function loadCars() {
@@ -114,12 +125,9 @@ export default function Home() {
 
         if (cancelled) return;
 
-        setCars(nextCars);
         setSelectedCar(nextCars[0] ?? "");
       } catch (error) {
         if (!cancelled) {
-          setCars([]);
-          setTracks([]);
           setTelemetry(null);
           setLoadError(error instanceof Error ? error.message : "Unable to load cars from backend.");
         }
@@ -133,11 +141,10 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [selectedCsvFile]);
 
   useEffect(() => {
-    if (!selectedCar) {
-      setTracks([]);
+    if (!selectedCsvFile || !selectedCar) {
       setSelectedTrack("");
       setTelemetry(null);
       return;
@@ -149,7 +156,6 @@ export default function Home() {
     async function loadTracks() {
       setLoadingTracks(true);
       setLoadError(null);
-      setTracks([]);
       setSelectedTrack("");
       setTelemetry(null);
       setSearchTerm("");
@@ -160,7 +166,6 @@ export default function Home() {
 
         if (controller.signal.aborted) return;
 
-        setTracks(nextTracks);
         setSelectedTrack(nextTracks[0] ?? "");
       } catch (error) {
         if (!controller.signal.aborted) {
@@ -174,10 +179,13 @@ export default function Home() {
     loadTracks();
 
     return () => controller.abort();
-  }, [selectedCar]);
+  }, [selectedCsvFile, selectedCar]);
 
   useEffect(() => {
-    if (!selectedCar || !selectedTrack) return;
+    if (!selectedCsvFile || !selectedCar || !selectedTrack) {
+      setTelemetry(null);
+      return;
+    }
 
     const controller = new AbortController();
     const query = new URLSearchParams({
@@ -209,7 +217,7 @@ export default function Home() {
     loadTelemetry();
 
     return () => controller.abort();
-  }, [selectedCar, selectedTrack]);
+  }, [selectedCsvFile, selectedCar, selectedTrack]);
 
   const filteredData = useMemo(() => {
     if (!telemetry) return [];
@@ -256,26 +264,14 @@ export default function Home() {
     });
   }, []);
 
-  const handleCarChange = (car: string) => {
-    setSelectedCar(car);
-  };
-
-  const handleTrackChange = (track: string) => {
-    setSelectedTrack(track);
-  };
-
   const isLoading = loadingCars || loadingTracks || loadingTelemetry;
 
   return (
     <div className={darkMode ? "dark min-h-screen" : "min-h-screen"}>
       <div className="min-h-screen bg-background text-foreground transition-colors duration-300">
         <Header
-          cars={cars}
-          selectedCar={selectedCar}
-          setSelectedCar={handleCarChange}
-          tracks={tracks}
-          selectedTrack={selectedTrack}
-          setSelectedTrack={handleTrackChange}
+          selectedCsvFile={selectedCsvFile}
+          setSelectedCsvFile={setSelectedCsvFile}
           darkMode={darkMode}
           setDarkMode={setDarkMode}
           loading={isLoading}
@@ -313,7 +309,7 @@ export default function Home() {
               <DashboardView chartData={telemetry} darkMode={darkMode} />
             ) : (
               <div className={`rounded-lg border p-8 text-sm ${darkMode ? "border-white/10 bg-[#15181d] text-zinc-400" : "border-zinc-200 bg-white text-zinc-600"}`}>
-                Select a backend car and track to load telemetry.
+                No telemetry data loaded. Select a CSV file to load telemetry.
               </div>
             )}
           </section>
@@ -328,7 +324,7 @@ export default function Home() {
             <div className="mb-3 flex items-end justify-between gap-4">
               <div>
                 <h2 className="text-lg font-semibold">Raw Telemetry</h2>
-                <p className="text-sm text-zinc-500">Paginated sample inspection for the active car and track.</p>
+                <p className="text-sm text-zinc-500">Paginated sample inspection for loaded telemetry.</p>
               </div>
             </div>
             <DataTableView
