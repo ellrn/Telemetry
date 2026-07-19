@@ -1,4 +1,5 @@
 import { Activity, CalendarDays, Download, Gauge, MapPin, Settings } from "lucide-react";
+import { formatValue } from "../utils/formatValue";
 
 interface TelemetryData {
   file: string;
@@ -17,12 +18,14 @@ interface MetadataBarProps {
 }
 
 function MetaItem({ label, value, icon }: { label: string, value?: string | number, icon?: React.ReactNode }) {
+  const displayValue = value == null || value === "" ? "-" : formatValue(label, value);
+
   return (
     <div className="min-w-0">
       <span className="flex items-center gap-2 text-[0.68rem] font-medium uppercase tracking-wide text-zinc-500">
         {icon} {label}
       </span>
-      <span className="mt-1 block truncate font-mono text-sm" title={String(value ?? "-")}>{value || "-"}</span>
+      <span className="mt-1 block truncate font-mono text-sm" title={displayValue}>{displayValue}</span>
     </div>
   );
 }

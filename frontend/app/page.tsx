@@ -26,19 +26,96 @@ type TelemetryData = {
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+const MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024;
+const CSV_CONTENT_TYPES = new Set(["", "text/csv", "application/csv", "application/vnd.ms-excel", "text/plain"]);
+
+function cleanColumnName(column: unknown) {
+  return String(column).replace(/^\uFEFF/, "").trim();
+}
+
+function parseTelemetryNumber(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const numericToken = trimmed
+    .replace(/%$/, "")
+    .trim()
+    .match(/^[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\d+,\d+)(?:e[+-]?\d+)?/i)?.[0];
+
+  if (!numericToken) return null;
+
+  const unsignedToken = numericToken.replace(/^[+-]/, "");
+  const normalizedToken =
+    unsignedToken.includes(",") && !unsignedToken.includes(".")
+      ? /^\d{1,3}(,\d{3})+$/.test(unsignedToken)
+        ? numericToken.replace(/,/g, "")
+        : numericToken.replace(",", ".")
+      : numericToken.replace(/,/g, "");
+  const numericValue = Number(normalizedToken);
+
+  return Number.isFinite(numericValue) ? numericValue : null;
+}
+
+function isSafeErrorMessage(message: string) {
+  const lowerMessage = message.toLowerCase();
+
+  return (
+    message.length <= 180 &&
+    !message.includes("\n") &&
+    !message.includes("\\") &&
+    !lowerMessage.includes("traceback") &&
+    !lowerMessage.includes("stack") &&
+    !lowerMessage.includes("exception")
+  );
+}
+
 function backendError(payload: unknown, fallback: string) {
+  let message: unknown;
+
   if (payload && typeof payload === "object" && "error" in payload) {
-    return String((payload as { error: unknown }).error);
+    message = (payload as { error: unknown }).error;
   }
 
   if (payload && typeof payload === "object" && "detail" in payload) {
-    return String((payload as { detail: unknown }).detail);
+    message = (payload as { detail: unknown }).detail;
+  }
+
+  if (typeof message === "string" && isSafeErrorMessage(message)) {
+    return message;
   }
 
   return fallback;
 }
 
+function validateCsvFile(file: File) {
+  if (!file.name.toLowerCase().endsWith(".csv")) {
+    return "Please select a CSV file.";
+  }
+
+  if (!CSV_CONTENT_TYPES.has(file.type)) {
+    return "Please select a valid CSV file.";
+  }
+
+  if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+    return "CSV file is too large. Maximum size is 50 MB.";
+  }
+
+  return null;
+}
+
+async function readJsonResponse(response: Response) {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
 async function uploadTelemetry(file: File, signal?: AbortSignal): Promise<TelemetryData> {
+  if (!API_BASE) {
+    throw new Error("Telemetry API URL is not configured.");
+  }
+
   const formData = new FormData();
   formData.append("file", file);
 
@@ -47,7 +124,7 @@ async function uploadTelemetry(file: File, signal?: AbortSignal): Promise<Teleme
     body: formData,
     signal,
   });
-  const payload = await response.json();
+  const payload = await readJsonResponse(response);
 
   if (!response.ok || (payload && typeof payload === "object" && "error" in payload)) {
     throw new Error(backendError(payload, "Telemetry upload failed."));
@@ -63,11 +140,35 @@ function normalizeTelemetry(payload: unknown): TelemetryData {
 
   const record = payload as Record<string, unknown>;
   const data = Array.isArray(record.data) ? record.data : null;
-  const columns = Array.isArray(record.columns) ? record.columns.map(String) : null;
+  const columns = Array.isArray(record.columns) ? record.columns.map(cleanColumnName) : null;
 
   if (!data || !columns) {
     throw new Error("Backend telemetry response did not include data and columns.");
   }
+
+  const normalizedData = data.map((row) => {
+    const nextRow: TelemetryRow = { time: 0 };
+    const record = row as Record<string, unknown>;
+
+    for (const [key, value] of Object.entries(record)) {
+      const column = cleanColumnName(key);
+
+      if (value === null || typeof value === "number") {
+        nextRow[column] = value;
+        continue;
+      }
+
+      if (typeof value === "string") {
+        const numericValue = parseTelemetryNumber(value);
+        nextRow[column] = numericValue ?? value.trim();
+        continue;
+      }
+
+      nextRow[column] = String(value);
+    }
+
+    return nextRow;
+  });
 
   return {
     file: String(record.file ?? ""),
@@ -75,7 +176,7 @@ function normalizeTelemetry(payload: unknown): TelemetryData {
     track: String(record.track ?? ""),
     rows: Number(record.rows ?? data.length),
     columns,
-    data: data as TelemetryRow[],
+    data: normalizedData,
     metadata: record.metadata as TelemetryData["metadata"],
   };
 }
@@ -137,6 +238,27 @@ export default function Home() {
     return () => controller.abort();
   }, [selectedCsvFile]);
 
+  const handleCsvFileChange = useCallback((file: File | null) => {
+    if (!file) {
+      setSelectedCsvFile(null);
+      return null;
+    }
+
+    const validationError = validateCsvFile(file);
+
+    if (validationError) {
+      setSelectedCsvFile(null);
+      setTelemetry(null);
+      setSearchTerm("");
+      setLoadError(validationError);
+      return validationError;
+    }
+
+    setLoadError(null);
+    setSelectedCsvFile(file);
+    return null;
+  }, []);
+
   const filteredData = useMemo(() => {
     if (!telemetry) return [];
 
@@ -187,7 +309,7 @@ export default function Home() {
       <div className="min-h-screen bg-background text-foreground transition-colors duration-300">
         <Header
           selectedCsvFile={selectedCsvFile}
-          setSelectedCsvFile={setSelectedCsvFile}
+          setSelectedCsvFile={handleCsvFileChange}
           darkMode={darkMode}
           setDarkMode={setDarkMode}
           loading={loadingTelemetry}

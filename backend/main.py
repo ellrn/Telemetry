@@ -1,18 +1,43 @@
 import os
 import pandas as pd
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from io import StringIO
-import json
 import math
+import logging
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+logger = logging.getLogger(__name__)
+ 
+MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024
+ALLOWED_CSV_CONTENT_TYPES = {
+    "text/csv",
+    "application/csv",
+    "application/vnd.ms-excel",
+    "text/plain",
+}
 
-allowed_origins = [
-    origin.strip()
-    for origin in os.getenv("FRONTEND_ORIGINS", os.getenv("FRONTEND_URL", "*")).split(",")
-    if origin.strip()
-]
+def get_allowed_origins():
+    configured_origins = [
+        origin.strip()
+        for origin in os.getenv("FRONTEND_ORIGINS", os.getenv("FRONTEND_URL", "")).split(",")
+        if origin.strip()
+    ]
+
+    fallback_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://0.0.0.0:3000",
+    ]
+
+    if configured_origins:
+        return configured_origins
+
+    logger.warning("No frontend origins configured. Falling back to local development origins.")
+    return fallback_origins
+
+
+allowed_origins = get_allowed_origins()
 
 @app.get("/")
 def root():
@@ -21,9 +46,28 @@ def root():
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|26\.186\.17\.216)(:\d+)?$",
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+def validate_upload_file(file: UploadFile):
+    filename = file.filename or ""
+    content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+
+    if not filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Unsupported file type. Please upload a CSV file.")
+
+    if content_type and content_type not in ALLOWED_CSV_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail="Unsupported file content type. Please upload a CSV file.")
+
+async def read_upload_limited(file: UploadFile):
+    contents = await file.read(MAX_UPLOAD_SIZE_BYTES + 1)
+
+    if len(contents) > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail="Uploaded file is too large. Maximum size is 50 MB.")
+
+    return contents
 
 def extract_metadata(lines):
     metadata = {}
@@ -34,6 +78,9 @@ def extract_metadata(lines):
     return metadata
 
 def extract_vehicle_params(lines):
+    if len(lines) < 13:
+        raise ValueError("Vehicle parameters section is incomplete.")
+
     params = {}
     header = lines[10].strip().split(",")
     units = lines[11].strip().split(",")
@@ -43,6 +90,9 @@ def extract_vehicle_params(lines):
     return params
 
 def extract_car_setup(lines):
+    if len(lines) < 17:
+        raise ValueError("Car setup section is incomplete.")
+
     setup = {}
     header = lines[14].strip().split(",")
     units = lines[15].strip().split(",")
@@ -53,6 +103,9 @@ def extract_car_setup(lines):
 
 def load_telemetry_data_from_lines(lines):
     """Finds telemetry data from split text lines in memory."""
+    if not lines:
+        raise ValueError("CSV file is empty.")
+
     start_idx = None
     for i, line in enumerate(lines):
         if line.strip().lower().startswith("time"):
@@ -64,18 +117,25 @@ def load_telemetry_data_from_lines(lines):
 
     telemetry_block = "\n".join(lines[start_idx:])
 
-    df = pd.read_csv(
-        StringIO(telemetry_block),
-        sep=",",
-        engine="python",
-        on_bad_lines="skip"
-    )
+    try:
+        df = pd.read_csv(
+            StringIO(telemetry_block),
+            sep=",",
+            engine="python",
+            on_bad_lines="skip"
+        )
+    except pd.errors.ParserError as exc:
+        logger.warning("CSV parser rejected uploaded telemetry file: %s", exc)
+        raise ValueError("CSV file could not be parsed.") from exc
 
     # Clean column names
     df.columns = [c.strip() for c in df.columns]
 
     # Remove completely empty columns
     df = df.dropna(axis=1, how="all")
+
+    if df.empty or len(df.columns) == 0:
+        raise ValueError("CSV file does not contain telemetry rows.")
 
     return df
 
@@ -92,25 +152,38 @@ def make_json_safe(obj):
     return obj
 
 @app.post("/telemetry")
-async def get_telemetry(file: UploadFile = File(...), window: int = Query(30)):
+async def get_telemetry(file: UploadFile = File(...)):
     """
     Accepts a telemetry CSV file via upload and returns filtered data.
     """
+    validate_upload_file(file)
+
     # 1. Read file stream from memory
     try:
-        contents = await file.read()
+        contents = await read_upload_limited(file)
         # Decode binary bytes to a clean list of text lines
         lines = contents.decode("utf-8").splitlines()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
+    except HTTPException:
+        raise
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="Uploaded CSV file must be UTF-8 encoded.")
+    except Exception:
+        logger.exception("Failed to read uploaded telemetry file.")
+        raise HTTPException(status_code=400, detail="Failed to read uploaded file.")
 
     # 2. Extract telemetry dataframe using memory-lines
     try:
         df = load_telemetry_data_from_lines(lines)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("Unexpected error while parsing uploaded telemetry file.")
+        raise HTTPException(status_code=400, detail="CSV file could not be parsed.")
 
     # Ensure time column exists
+    if len(df.columns) == 0:
+        raise HTTPException(status_code=400, detail="CSV file does not contain telemetry columns.")
+
     if "time" not in df.columns:
         df.rename(columns={df.columns[0]: "time"}, inplace=True)
 
@@ -118,16 +191,13 @@ async def get_telemetry(file: UploadFile = File(...), window: int = Query(30)):
     df["time"] = pd.to_numeric(df["time"], errors="coerce")
     df = df.dropna(subset=["time"])
 
+    if df.empty:
+        raise HTTPException(status_code=400, detail="CSV file does not contain valid telemetry time values.")
+
     # Sort by time
     df = df.sort_values("time").reset_index(drop=True)
 
-    # 3. TIME WINDOW FILTER (RELATIVE START)
-    if not df.empty:
-        start_time = df["time"].iloc[0]
-        end_time = start_time + window
-        df = df[(df["time"] >= start_time) & (df["time"] <= end_time)]
-
-    # 4. CONVERT TO JSON
+    # 3. CONVERT TO JSON
     table_data = df.to_dict(orient="records")
 
     table_data_safe = []
@@ -143,7 +213,7 @@ async def get_telemetry(file: UploadFile = File(...), window: int = Query(30)):
                 clean_row[k] = v
         table_data_safe.append(clean_row)
 
-    # 5. DYNAMICALLY EXTRACT METADATA FROM UPLOADED CSV
+    # 4. DYNAMICALLY EXTRACT METADATA FROM UPLOADED CSV
     parsed_metadata = extract_metadata(lines)
     
     # Check your CSV file structure; adjust keys below matching your CSV header labels

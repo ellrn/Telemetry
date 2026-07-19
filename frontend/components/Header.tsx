@@ -2,7 +2,7 @@ import { Activity, FileUp, Moon, RefreshCw, Sun } from "lucide-react";
 
 interface HeaderProps {
   selectedCsvFile: File | null;
-  setSelectedCsvFile: (file: File | null) => void;
+  setSelectedCsvFile: (file: File | null) => string | null;
   darkMode: boolean;
   setDarkMode: (mode: boolean) => void;
   loading?: boolean;
@@ -31,7 +31,13 @@ export default function Header({ selectedCsvFile, setSelectedCsvFile, darkMode, 
           <input
             type="file"
             accept=".csv,text/csv"
-            onChange={(e) => setSelectedCsvFile(e.target.files?.[0] ?? null)}
+            onChange={(e) => {
+              const validationError = setSelectedCsvFile(e.target.files?.[0] ?? null);
+
+              if (validationError) {
+                e.currentTarget.value = "";
+              }
+            }}
             className={`max-w-[15rem] text-sm file:mr-3 file:rounded-md file:border-0 file:px-3 file:py-1.5 file:text-xs file:font-semibold ${darkMode ? "text-zinc-100 file:bg-red-400/10 file:text-red-200" : "text-zinc-900 file:bg-red-50 file:text-red-600"}`}
           />
           <span className="text-xs text-zinc-500">
