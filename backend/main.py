@@ -296,3 +296,9 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
     logger.info("Starting Telemetry API on 0.0.0.0:%d", port)
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+
+@app.post("/test")
+async def test(file: UploadFile = File(...)):
+    contents = await file.read()
+    return {"size": len(contents)}
