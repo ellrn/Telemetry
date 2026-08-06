@@ -1,4 +1,5 @@
 import os
+import json
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from io import StringIO
@@ -7,6 +8,7 @@ import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import StreamingResponse
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -85,13 +87,30 @@ async def read_upload_limited(file: UploadFile):
 
     return contents
 
-def extract_metadata(lines):
+def split_upload_text(text):
+    """Extract metadata and locate the telemetry CSV without copying every line."""
     metadata = {}
-    for line in lines[:10]:
-        if "," in line:
+    cursor = 0
+    line_number = 0
+
+    while cursor < len(text):
+        newline_index = text.find("\n", cursor)
+        line_end = len(text) if newline_index == -1 else newline_index
+        line = text[cursor:line_end].rstrip("\r")
+
+        if line.strip().lower().startswith("time"):
+            return metadata, cursor
+
+        if line_number < 10 and "," in line:
             key, value = line.strip().split(",", 1)
             metadata[key.strip()] = value.strip()
-    return metadata
+
+        if newline_index == -1:
+            break
+        cursor = newline_index + 1
+        line_number += 1
+
+    raise ValueError("Telemetry header ('Time') not found in the file.")
 
 def extract_vehicle_params(lines):
     if len(lines) < 13:
@@ -117,25 +136,16 @@ def extract_car_setup(lines):
         setup[h] = {"unit": u, "value": v}
     return setup
 
-def load_telemetry_data_from_lines(lines):
-    """Finds telemetry data from split text lines in memory."""
-    if not lines:
+def load_telemetry_data(text, telemetry_start):
+    """Load only the telemetry portion of an uploaded CSV into a DataFrame."""
+    if telemetry_start >= len(text):
         raise ValueError("CSV file is empty.")
 
-    start_idx = None
-    for i, line in enumerate(lines):
-        if line.strip().lower().startswith("time"):
-            start_idx = i
-            break
-
-    if start_idx is None:
-        raise ValueError("Telemetry header ('Time') not found in the file.")
-
-    telemetry_block = "\n".join(lines[start_idx:])
-
     try:
+        telemetry_stream = StringIO(text)
+        telemetry_stream.seek(telemetry_start)
         df = pd.read_csv(
-            StringIO(telemetry_block),
+            telemetry_stream,
             sep=",",
             engine="python",
             on_bad_lines="skip"
@@ -148,24 +158,74 @@ def load_telemetry_data_from_lines(lines):
     df.columns = [c.strip() for c in df.columns]
 
     # Remove completely empty columns
-    df = df.dropna(axis=1, how="all")
+    df.dropna(axis=1, how="all", inplace=True)
 
     if df.empty or len(df.columns) == 0:
         raise ValueError("CSV file does not contain telemetry rows.")
 
     return df
 
-def make_json_safe(obj):
-    """Replace NaN / Inf with None"""
-    if isinstance(obj, dict):
-        return {k: make_json_safe(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [make_json_safe(v) for v in obj]
-    elif isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    return obj
+def stream_telemetry_response(file_name, car_name, track_name, df):
+    """Serialize DataFrame rows with a bounded output buffer."""
+    columns = list(df.columns)
+    row_count = len(df)
+    duration = df["time"].iloc[-1] if row_count else None
+    duration_item = getattr(duration, "item", None)
+    if callable(duration_item):
+        duration = duration_item()
+    metadata = {
+        "Format": "AC pyTelemetry CSV",
+        "Venue": track_name,
+        "Vehicle": car_name,
+        "Driver": "Ellis",
+        "Sample Rate": "50",
+        "Duration": duration,
+    }
+    header = {
+        "file": file_name,
+        "car": car_name,
+        "track": track_name,
+        "rows": row_count,
+        "columns": columns,
+    }
+
+    yield json.dumps(header, separators=(",", ":"))[:-1].encode("utf-8")
+    yield b',"data":['
+
+    buffer = bytearray()
+    first_record = True
+    for row in df.itertuples(index=False, name=None):
+        record = {
+            column: _json_value(value)
+            for column, value in zip(columns, row)
+        }
+        if not first_record:
+            buffer.extend(b",")
+        first_record = False
+        buffer.extend(json.dumps(record, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+
+        if len(buffer) >= 64 * 1024:
+            yield bytes(buffer)
+            buffer.clear()
+
+    if buffer:
+        yield bytes(buffer)
+
+    del df
+    yield b"]"
+    yield b',"metadata":'
+    yield json.dumps(metadata, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    yield b"}"
+
+
+def _json_value(value):
+    """Convert pandas/numpy scalars to valid JSON values without retaining a row list."""
+    value_item = getattr(value, "item", None)
+    if callable(value_item):
+        value = value_item()
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
 
 @app.post("/telemetry")
 async def get_telemetry(file: UploadFile = File(...)):
@@ -177,8 +237,8 @@ async def get_telemetry(file: UploadFile = File(...)):
     # 1. Read file stream from memory
     try:
         contents = await read_upload_limited(file)
-        # Decode binary bytes to a clean list of text lines
-        lines = contents.decode("utf-8").splitlines()
+        text = contents.decode("utf-8")
+        del contents
     except HTTPException:
         raise
     except UnicodeDecodeError:
@@ -189,7 +249,9 @@ async def get_telemetry(file: UploadFile = File(...)):
 
     # 2. Extract telemetry dataframe using memory-lines
     try:
-        df = load_telemetry_data_from_lines(lines)
+        parsed_metadata, telemetry_start = split_upload_text(text)
+        df = load_telemetry_data(text, telemetry_start)
+        del text
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception:
@@ -205,55 +267,27 @@ async def get_telemetry(file: UploadFile = File(...)):
 
     # FORCE NUMERIC TIME
     df["time"] = pd.to_numeric(df["time"], errors="coerce")
-    df = df.dropna(subset=["time"])
+    df.dropna(subset=["time"], inplace=True)
 
     if df.empty:
         raise HTTPException(status_code=400, detail="CSV file does not contain valid telemetry time values.")
 
     # Sort by time
-    df = df.sort_values("time").reset_index(drop=True)
+    df.sort_values("time", inplace=True)
+    df.reset_index(drop=True, inplace=True)
 
-    # 3. CONVERT TO JSON
-    table_data = df.to_dict(orient="records")
-
-    table_data_safe = []
-    for row in table_data:
-        clean_row = {}
-        for k, v in row.items():
-            if isinstance(v, float):
-                if math.isnan(v) or math.isinf(v):
-                    clean_row[k] = None
-                else:
-                    clean_row[k] = v
-            else:
-                clean_row[k] = v
-        table_data_safe.append(clean_row)
+    # 3. Replace non-finite values in-place. Pandas serializes NaN as JSON null.
+    df.replace([math.inf, -math.inf], math.nan, inplace=True)
 
     # 4. DYNAMICALLY EXTRACT METADATA FROM UPLOADED CSV
-    parsed_metadata = extract_metadata(lines)
-
     # Check your CSV file structure; adjust keys below matching your CSV header labels
     car_name = parsed_metadata.get("Car") or parsed_metadata.get("Vehicle") or "Unknown Car"
     track_name = parsed_metadata.get("Track") or parsed_metadata.get("Venue") or "Unknown Track"
 
-    metadata_safe = make_json_safe({
-        "Format": "AC pyTelemetry CSV",
-        "Venue": track_name,
-        "Vehicle": car_name,
-        "Driver": "Ellis",
-        "Sample Rate": "50",
-        "Duration": table_data_safe[-1]["time"] if table_data_safe else None
-    })
-
-    return {
-        "file": file.filename,
-        "car": car_name,
-        "track": track_name,
-        "rows": len(df),
-        "columns": list(df.columns),
-        "data": table_data_safe,
-        "metadata": metadata_safe
-    }
+    return StreamingResponse(
+        stream_telemetry_response(file.filename, car_name, track_name, df),
+        media_type="application/json",
+    )
 
 
 if __name__ == "__main__":
