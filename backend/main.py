@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 logger = logging.getLogger(__name__)
- 
+
 MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024
 ALLOWED_CSV_CONTENT_TYPES = {
     "text/csv",
@@ -215,7 +215,7 @@ async def get_telemetry(file: UploadFile = File(...)):
 
     # 4. DYNAMICALLY EXTRACT METADATA FROM UPLOADED CSV
     parsed_metadata = extract_metadata(lines)
-    
+
     # Check your CSV file structure; adjust keys below matching your CSV header labels
     car_name = parsed_metadata.get("Car") or parsed_metadata.get("Vehicle") or "Unknown Car"
     track_name = parsed_metadata.get("Track") or parsed_metadata.get("Venue") or "Unknown Track"
