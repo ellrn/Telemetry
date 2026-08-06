@@ -54,6 +54,27 @@ def test_telemetry_endpoint_accepts_csv_upload():
     assert payload["data"][0]["time"] == 0
 
 
+def test_telemetry_serializes_non_finite_values_as_null():
+    response = client.post(
+        "/telemetry",
+        files={
+            "file": (
+                "telemetry.csv",
+                "time,speed\n0,100\n1,inf\n2,\n",
+                "text/csv",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["data"] == [
+        {"time": 0, "speed": 100},
+        {"time": 1, "speed": None},
+        {"time": 2, "speed": None},
+    ]
+
+
 def test_cors_preflight_allows_configured_methods():
     response = client.options(
         "/telemetry",
