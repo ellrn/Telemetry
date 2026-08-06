@@ -39,15 +39,17 @@ export default function DataTableView({
     () => (telemetry?.columns ?? []).filter((col) => visibleColumns.includes(col)),
     [telemetry?.columns, visibleColumns]
   );
+  const searchColumns = useMemo(() => telemetry?.columns ?? [], [telemetry?.columns]);
+  const sourceData = telemetry?.data ?? filteredData;
 
   const sampledData = useMemo(() => {
     const rowsBySecond = new Map<number, TelemetryRow>();
 
-    for (const row of filteredData) {
+    for (const row of sourceData) {
       const time = Number(row.time);
 
       if (!Number.isFinite(time)) {
-        return filteredData;
+        return sourceData;
       }
 
       const second = Math.floor(time);
@@ -58,17 +60,32 @@ export default function DataTableView({
     }
 
     return Array.from(rowsBySecond.values());
-  }, [filteredData]);
+  }, [sourceData]);
 
-  const totalPages = Math.max(1, Math.ceil(sampledData.length / pageSize));
+  const tableData = useMemo(() => {
+    const query = searchTerm.trim().toLowerCase();
+
+    if (!query) return sampledData;
+
+    return sampledData.filter((row) =>
+      searchColumns.some((column) => {
+        const columnMatch = column.toLowerCase().includes(query);
+        const valueMatch = String(row[column] ?? "").toLowerCase().includes(query);
+
+        return columnMatch || valueMatch;
+      })
+    );
+  }, [sampledData, searchColumns, searchTerm]);
+
+  const totalPages = Math.max(1, Math.ceil(tableData.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const pageStart = (currentPage - 1) * pageSize;
-  const pageRows = sampledData.slice(pageStart, pageStart + pageSize);
-  const firstRow = sampledData.length === 0 ? 0 : pageStart + 1;
-  const lastRow = Math.min(pageStart + pageSize, sampledData.length);
+  const pageRows = tableData.slice(pageStart, pageStart + pageSize);
+  const firstRow = tableData.length === 0 ? 0 : pageStart + 1;
+  const lastRow = Math.min(pageStart + pageSize, tableData.length);
 
   const isNumericColumn = (column: string) =>
-    sampledData.some((row) => Number.isFinite(Number(row?.[column])));
+    tableData.some((row) => Number.isFinite(Number(row?.[column])));
 
   if (!telemetry?.columns || !Array.isArray(filteredData)) {
     return (
@@ -95,7 +112,7 @@ export default function DataTableView({
           <Search className="mr-2 text-zinc-500" size={18} />
           <input
             type="text"
-            placeholder="Search value..."
+            placeholder="Search name and time value."
             value={searchTerm}
             onChange={(e) => {
               setPage(1);
@@ -107,7 +124,7 @@ export default function DataTableView({
 
         <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-500">
           <span className="font-mono">
-            Showing {firstRow}-{lastRow} of {sampledData.length}
+            Showing {firstRow}-{lastRow} of {tableData.length}
           </span>
           <label className="flex items-center gap-2">
             Rows
@@ -128,7 +145,7 @@ export default function DataTableView({
       </div>
 
       <div className="h-[560px] w-full overflow-y-auto overflow-x-hidden p-3">
-        {sampledData.length === 0 && (
+        {tableData.length === 0 && (
           <div className="p-8 text-center text-zinc-500">
             No matching records found.
           </div>

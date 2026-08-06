@@ -1,4 +1,9 @@
 {
+    "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/backend"
+    ],
+    "python.analysis.excludeLibraryDiagnostics": true,
     "python-envs.defaultEnvManager": "ms-python.python:system",
     "git.ignoreLimitWarning": true
 }
