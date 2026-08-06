@@ -15,6 +15,12 @@ def test_root():
     assert response.json() == {"message":"Welcome to the dashboard"}
 
 
+def test_health():
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 def test_telemetry_endpoint_accepts_csv_upload():
     csv_content = "\n".join([
         "Car,Demo Car",

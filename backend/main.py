@@ -4,10 +4,21 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from io import StringIO
 import math
 import logging
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI()
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    logger.info("Telemetry API initialized and ready to accept requests.")
+    yield
+    logger.info("Telemetry API shutting down.")
+
+
+app = FastAPI(lifespan=lifespan)
 
 MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024
 ALLOWED_CSV_CONTENT_TYPES = {
@@ -42,6 +53,11 @@ allowed_origins = get_allowed_origins()
 @app.get("/")
 def root():
     return {"message": "Welcome to the dashboard"}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 app.add_middleware(
     CORSMiddleware,
@@ -238,3 +254,11 @@ async def get_telemetry(file: UploadFile = File(...)):
         "data": table_data_safe,
         "metadata": metadata_safe
     }
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("PORT", "10000"))
+    logger.info("Starting Telemetry API on 0.0.0.0:%d", port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
