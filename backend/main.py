@@ -12,13 +12,11 @@ from starlette.responses import StreamingResponse
 
 logger = logging.getLogger("uvicorn.error")
 
-
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info("Telemetry API initialized and ready to accept requests.")
     yield
     logger.info("Telemetry API shutting down.")
-
 
 app = FastAPI(lifespan=lifespan)
 
@@ -44,7 +42,7 @@ def get_allowed_origins():
     ]
 
     if configured_origins:
-        return configured_origins
+        return configured_origins 
 
     logger.warning("No frontend origins configured. Falling back to local development origins.")
     return fallback_origins
