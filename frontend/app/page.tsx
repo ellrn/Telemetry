@@ -26,6 +26,7 @@ type TelemetryData = {
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+console.log("Loaded API URL:", API_BASE);
 const MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024;
 const CSV_CONTENT_TYPES = new Set(["", "text/csv", "application/csv", "application/vnd.ms-excel", "text/plain"]);
 

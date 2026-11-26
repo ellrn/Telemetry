@@ -4,9 +4,28 @@ import os
 os.environ.setdefault("FRONTEND_ORIGINS", "https://example.com")
 
 from fastapi.testclient import TestClient
-from main import MAX_UPLOAD_SIZE_BYTES, app
+from main import MAX_UPLOAD_SIZE_BYTES, PRIORITY_1_FIELDS, app
 
 client = TestClient(app)
+
+PRIORITY_COLUMNS = [
+    "time", "Lap Time", "Lap Distance", "Lap Number", "Ground Speed",
+    "Throttle Pos", "Brake Pos", "Steering Angle", "Gear", "Engine RPM",
+    "Brake Torque FL", "Brake Torque FR", "Brake Torque RL", "Brake Torque RR",
+    "Wheel Angular Speed FL", "Wheel Angular Speed FR", "Wheel Angular Speed RL",
+    "Wheel Angular Speed RR", "Car Coord X", "Car Coord Y", "Car Coord Z", "Car Heading",
+]
+
+
+def telemetry_csv(rows, extra_columns=None):
+    columns = PRIORITY_COLUMNS + (extra_columns or [])
+    header = ",".join(columns)
+    row_text = []
+    for row in rows:
+        time, *values = row if isinstance(row, tuple) else (row,)
+        values = ["1"] * (len(columns) - 1) if not values else values + ["1"] * (len(columns) - 2)
+        row_text.append(",".join([str(time), *map(str, values)]))
+    return "\n".join(["Car,Demo Car", "Track,Demo Track", *(["Metadata,Test"] * 8), header, *row_text])
 
 
 def test_root():
@@ -22,22 +41,7 @@ def test_health():
 
 
 def test_telemetry_endpoint_accepts_csv_upload():
-    csv_content = "\n".join([
-        "Car,Demo Car",
-        "Track,Demo Track",
-        "Driver,Ellis",
-        "Session,Test",
-        "Date,2026-06-26",
-        "Sample Rate,50",
-        "Note,Test",
-        "Extra,Test",
-        "Extra2,Test",
-        "Extra3,Test",
-        "time,speed,rpm",
-        "s,km/h,rpm",
-        "0,100,5000",
-        "1,110,5200",
-    ])
+    csv_content = telemetry_csv([0, 1], ["Unneeded Field"])
 
     response = client.post(
         "/telemetry",
@@ -50,7 +54,8 @@ def test_telemetry_endpoint_accepts_csv_upload():
     assert payload["car"] == "Demo Car"
     assert payload["track"] == "Demo Track"
     assert payload["rows"] == 2
-    assert payload["columns"] == ["time", "speed", "rpm"]
+    assert set(payload["columns"]) == PRIORITY_1_FIELDS
+    assert "Unneeded Field" not in payload["columns"]
     assert payload["data"][0]["time"] == 0
 
 
@@ -60,7 +65,7 @@ def test_telemetry_serializes_non_finite_values_as_null():
         files={
             "file": (
                 "telemetry.csv",
-                "time,speed\n0,100\n1,inf\n2,\n",
+                telemetry_csv([(0, 100), ("inf", 110), (2, "inf")]),
                 "text/csv",
             )
         },
@@ -68,11 +73,9 @@ def test_telemetry_serializes_non_finite_values_as_null():
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["data"] == [
-        {"time": 0, "speed": 100},
-        {"time": 1, "speed": None},
-        {"time": 2, "speed": None},
-    ]
+    assert [row["time"] for row in payload["data"]] == [0, 2, None]
+    assert payload["data"][1]["Lap Time"] is None
+    assert all(set(row) == PRIORITY_1_FIELDS for row in payload["data"])
 
 
 def test_cors_preflight_allows_configured_methods():
@@ -139,10 +142,20 @@ def test_telemetry_rejects_missing_time_header():
     assert response.json()["detail"] == "Telemetry header ('Time') not found in the file."
 
 
+def test_telemetry_rejects_missing_priority_columns():
+    response = client.post(
+        "/telemetry",
+        files={"file": ("telemetry.csv", "time,Ground Speed\n0,100", "text/csv")},
+    )
+
+    assert response.status_code == 400
+    assert "missing required Priority 1 telemetry columns" in response.json()["detail"]
+
+
 def test_telemetry_ignores_window_query_and_returns_full_session():
     response = client.post(
         "/telemetry?window=1",
-        files={"file": ("telemetry.csv", "time,speed\n0,100\n47,120", "text/csv")},
+        files={"file": ("telemetry.csv", telemetry_csv([0, 47]), "text/csv")},
     )
 
     assert response.status_code == 200

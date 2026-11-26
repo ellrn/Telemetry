@@ -28,6 +28,31 @@ ALLOWED_CSV_CONTENT_TYPES = {
     "text/plain",
 }
 
+PRIORITY_1_FIELDS = {
+    "time",
+    "Lap Time",
+    "Lap Distance",
+    "Lap Number",
+    "Ground Speed",
+    "Throttle Pos",
+    "Brake Pos",
+    "Steering Angle",
+    "Gear",
+    "Engine RPM",
+    "Brake Torque FL",
+    "Brake Torque FR",
+    "Brake Torque RL",
+    "Brake Torque RR",
+    "Wheel Angular Speed FL",
+    "Wheel Angular Speed FR",
+    "Wheel Angular Speed RL",
+    "Wheel Angular Speed RR",
+    "Car Coord X",
+    "Car Coord Y",
+    "Car Coord Z",
+    "Car Heading",
+}
+
 def get_allowed_origins():
     configured_origins = [
         origin.strip()
@@ -146,7 +171,9 @@ def load_telemetry_data(text, telemetry_start):
             telemetry_stream,
             sep=",",
             engine="python",
-            on_bad_lines="skip"
+            on_bad_lines="skip",
+            usecols=lambda column: str(column).strip() in PRIORITY_1_FIELDS
+            or str(column).strip().lower() == "time",
         )
     except pd.errors.ParserError as exc:
         logger.warning("CSV parser rejected uploaded telemetry file: %s", exc)
@@ -154,12 +181,19 @@ def load_telemetry_data(text, telemetry_start):
 
     # Clean column names
     df.columns = [c.strip() for c in df.columns]
+    if len(df.columns) and df.columns[0].lower() == "time":
+        df.rename(columns={df.columns[0]: "time"}, inplace=True)
 
     # Remove completely empty columns
     df.dropna(axis=1, how="all", inplace=True)
 
     if df.empty or len(df.columns) == 0:
         raise ValueError("CSV file does not contain telemetry rows.")
+
+    missing_fields = PRIORITY_1_FIELDS.difference(df.columns)
+    if missing_fields:
+        missing_list = ", ".join(sorted(missing_fields))
+        raise ValueError(f"CSV file is missing required Priority 1 telemetry columns: {missing_list}.")
 
     return df
 
@@ -171,6 +205,7 @@ def stream_telemetry_response(file_name, car_name, track_name, df):
     duration_item = getattr(duration, "item", None)
     if callable(duration_item):
         duration = duration_item()
+    duration = _json_value(duration)
     metadata = {
         "Format": "AC pyTelemetry CSV",
         "Venue": track_name,
@@ -255,13 +290,6 @@ async def get_telemetry(file: UploadFile = File(...)):
     except Exception:
         logger.exception("Unexpected error while parsing uploaded telemetry file.")
         raise HTTPException(status_code=400, detail="CSV file could not be parsed.")
-
-    # Ensure time column exists
-    if len(df.columns) == 0:
-        raise HTTPException(status_code=400, detail="CSV file does not contain telemetry columns.")
-
-    if "time" not in df.columns:
-        df.rename(columns={df.columns[0]: "time"}, inplace=True)
 
     # FORCE NUMERIC TIME
     df["time"] = pd.to_numeric(df["time"], errors="coerce")
